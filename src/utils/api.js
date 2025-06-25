@@ -15,7 +15,7 @@ import {
 import { db } from '../firebase';
 import { getCurrentUser } from './auth';
 
-const API_URL = 'http://localhost:3000/api';
+const API_URL = 'https://rasedbackend.onrender.com/api';
 const NEWS_STORAGE_KEY = 'rased_news_data';
 const LAST_FETCHED_KEY = 'rased_last_fetched';
 
