@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import { 
+  fetchAllNews,
   fetchAllNewsWithAutoSave, 
   toggleArticleFavorite,
   fetchNewsFromDatabase,
@@ -8,13 +9,14 @@ import {
   getAllNewsCategories,
   saveNewsItem,
   saveMultipleNewsItems,
-  unsaveNewsItem,
-  unsaveMultipleNewsItems,
-  fetchAndProcessNewArticles
+  fetchAndProcessNewArticles,
+  forceRefreshNews,
+  getCacheStatus,
+  CACHE_DURATION
 } from '../../utils/api';
 import NewsCard from '../../components/NewsCard';
 import { getCorrectImageUrl } from '../../utils/helpers';
-import { saveToLocalStorage } from '../../utils/storage';
+import { saveToLocalStorage, getFromLocalStorage } from '../../utils/storage';
 import { callGeminiApi } from '../../utils/gemini';
 import { parseMultilingualDatesWithDeepSeek } from '../../utils/deepseek';
 
@@ -719,7 +721,7 @@ const News = () => {
   const [selectedArticles, setSelectedArticles] = useState(new Set());
   const [savingAll, setSavingAll] = useState(false);
   const [unsavingAll, setUnsavingAll] = useState(false);
-  
+
   // Add keyword filter state
   const [keywordInput, setKeywordInput] = useState('');
   const [keywords, setKeywords] = useState([]);
@@ -749,6 +751,9 @@ const News = () => {
   // Add the missing state variables
   const [removingFromFavorites, setRemovingFromFavorites] = useState(false);
 
+  // Add cache status state
+  const [cacheStatus, setCacheStatus] = useState(null);
+
   // Auto-refresh every minute
   useEffect(() => {
     let interval;
@@ -769,10 +774,21 @@ const News = () => {
 
   // Initial load
   useEffect(() => {
-    loadNewsData(true, false); // Initial load with force refresh
+    loadNewsData(false, false);
   }, []);
 
-  const loadNewsData = async (forceRefresh = false, isAutoRefresh = false) => {
+  // Auto-refresh every 2 hours
+  useEffect(() => {
+    const interval = setInterval(() => {
+      console.log('⏰ Auto-refresh triggered (2 hours passed)');
+      loadNewsData(true, true); // Refresh = true for auto-refresh
+    }, CACHE_DURATION);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Enhanced loadNewsData - minimal changes
+  const loadNewsData = useCallback(async (isRefresh = false, isAutoRefresh = false) => {
     try {
       if (!isAutoRefresh) {
         setLoading(true);
@@ -780,40 +796,33 @@ const News = () => {
         setRefreshing(true);
       }
       
-      console.log(`📡 Loading news data (force: ${forceRefresh}, auto: ${isAutoRefresh})`);
+      console.log(`📡 ${isRefresh ? 'Refreshing' : 'Loading'} news data...`);
       
-      // Use the new fetch and process function
-      const result = await fetchAndProcessNewArticles();
+      // Use enhanced fetchAndProcessNewArticles with refresh flag
+      const result = await fetchAndProcessNewArticles(isRefresh);
       
-      // CRITICAL FIX: Remove duplicates before setting state
+      // Remove duplicates and set articles
       const uniqueArticles = removeDuplicateArticles(result.articles);
-      console.log(`🔧 Removed ${result.articles.length - uniqueArticles.length} duplicate articles`);
-      
       setArticles(uniqueArticles);
-      setNewArticlesCount(result.newArticlesCount);
+      setNewArticlesCount(result.newArticlesCount || 0);
       setLastRefreshTime(new Date());
       
-      // Use available sources from API instead of just database sources
+      // Set sources and categories
       if (result.availableSources) {
         setAvailableSources(result.availableSources);
         setSources(result.availableSources);
+      }
+      
+      const allCategories = [...new Set(uniqueArticles.map(article => 
+        article.category || article.fullContent?.category
+      ).filter(Boolean))];
+      setCategories(allCategories);
+      
+      if (result.fromCache) {
+        console.log(`⚡ Instant load: ${uniqueArticles.length} articles from cache`);
       } else {
-        // Fallback: extract from unique articles
-        const uniqueSources = [...new Set(uniqueArticles.map(article => article.source))];
-        setSources(uniqueSources);
-        setAvailableSources(uniqueSources);
+        console.log(`📊 Updated: ${uniqueArticles.length} total articles (${result.newArticlesCount} new)`);
       }
-      
-      // Extract categories from unique articles
-      const uniqueCategories = [...new Set(uniqueArticles.map(article => article.category).filter(Boolean))];
-      setCategories(uniqueCategories);
-      
-      if (isAutoRefresh && result.newArticlesCount > 0) {
-        console.log(`✨ Auto-refresh found ${result.newArticlesCount} new articles`);
-      }
-      
-      console.log(`📊 Total articles: ${uniqueArticles.length}, New: ${result.newArticlesCount}`);
-      console.log(`📋 Available sources:`, result.availableSources);
       
     } catch (error) {
       console.error('❌ Error loading news data:', error);
@@ -821,7 +830,7 @@ const News = () => {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
 
   // NEW FUNCTION: Remove duplicate articles by ID
   const removeDuplicateArticles = (articles) => {
@@ -876,17 +885,30 @@ const News = () => {
     setAutoRefreshEnabled(!autoRefreshEnabled);
   };
 
+  // Add the missing handleForceRefresh function
+  const handleForceRefresh = async () => {
+    try {
+      setLoading(true);
+      console.log('🔄 Force refresh: keeping existing data, adding new articles...');
+      await loadNewsData(true, false); // isRefresh = true, keeps old data + adds new
+    } catch (error) {
+      console.error('Error force refreshing:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Enhanced filtering function that includes AI filtering
   const getDisplayArticles = () => {
     // If AI filter is active, use AI filtered results
     if (aiFilterActive && aiFilteredArticles.length > 0) {
       return aiFilteredArticles.filter(article => {
-        const sourceMatch = selectedSource === 'all' || article.source === selectedSource;
-        const categoryMatch = selectedCategory === 'all' || 
-                           (article.fullContent && 
-                            article.fullContent.category && 
-                            article.fullContent.category.includes(selectedCategory));
-        
+    const sourceMatch = selectedSource === 'all' || article.source === selectedSource;
+    const categoryMatch = selectedCategory === 'all' || 
+                       (article.fullContent && 
+                        article.fullContent.category && 
+                        article.fullContent.category.includes(selectedCategory));
+    
         // Apply keyword filter if active
         let keywordMatch = true;
         if (keywords.length > 0) {
@@ -927,7 +949,7 @@ const News = () => {
         }
         
         return sourceMatch && categoryMatch && keywordMatch;
-      });
+  });
     }
     
     // Otherwise use regular filtering
@@ -1263,69 +1285,6 @@ If no articles match, respond with an empty array: []`;
     }
   };
 
-  const handleUnsaveArticle = async (articleId) => {
-    try {
-      const success = await unsaveNewsItem(articleId);
-      
-      if (success) {
-        // Update the articles array to reflect unsaved state
-        setArticles(prevArticles => {
-          return prevArticles.map(a => {
-            if (a.id === articleId) {
-              return { ...a, isSaved: false };
-            }
-            return a;
-          });
-        });
-      }
-      
-      return success;
-    } catch (error) {
-      console.error("Error unsaving article:", error);
-      return false;
-    }
-  };
-
-  const handleUnsaveSelected = async () => {
-    if (selectedArticles.size === 0) {
-      alert('Please select at least one article to unsave.');
-      return;
-    }
-    
-    setUnsavingAll(true);
-    try {
-      // Get IDs of selected articles
-      const articleIds = Array.from(selectedArticles);
-      
-      // Unsave all selected articles from Firebase
-      console.log("Unsaving articles:", articleIds.length);
-      const unsaveResult = await unsaveMultipleNewsItems(articleIds);
-      
-      // Update UI to show unsave results
-      alert(`Unsave results: ${unsaveResult.unsaved} articles unsaved, ${unsaveResult.notSaved} were not saved.`);
-      
-      // Update the UI to reflect unsaved state
-      setArticles(prevArticles => {
-        return prevArticles.map(article => {
-          if (selectedArticles.has(article.id)) {
-            return { ...article, isSaved: false };
-          }
-          return article;
-        });
-      });
-      
-      // Clear selections
-      setSelectedArticles(new Set());
-      setSelectionMode(false);
-      
-    } catch (error) {
-      console.error('Error unsaving multiple articles:', error);
-      alert('Some articles could not be unsaved. Please try again.');
-    } finally {
-      setUnsavingAll(false);
-    }
-  };
-
   // Add keyword functions
   const handleKeywordInputChange = (e) => {
     setKeywordInput(e.target.value);
@@ -1358,84 +1317,6 @@ If no articles match, respond with an empty array: []`;
     setKeywordMode(prev => prev === 'OR' ? 'AND' : 'OR');
   };
 
-  // Function to save all filtered results
-  const saveAllFilteredResults = async () => {
-    if (filteredArticles.length === 0) {
-      alert('No articles to save. Please apply filters first.');
-      return;
-    }
-
-    setSavingAllResults(true);
-    try {
-      // Process each article to prepare for saving
-      const articlesToSave = filteredArticles.map(article => {
-        // Get the image URL
-        let imageUrl;
-        if (article.source === "almayadeen.net/politics" || 
-            (article.source && article.source.includes("almayadeen.net"))) {
-          if (article.fullContent?.fullArticle?.mainImage?.url) {
-            imageUrl = article.fullContent.fullArticle.mainImage.url;
-          }
-        } else {
-          imageUrl = article.fullContent?.mainImage || article.imageUrl;
-        }
-        
-        if (!imageUrl) {
-          imageUrl = 'https://via.placeholder.com/300x180?text=No+Image';
-        }
-        
-        return {
-          ...article,
-          imageUrl: imageUrl,
-          isSaved: true
-        };
-      });
-      
-      // Save all articles to Firebase
-      console.log("Saving all filtered results:", articlesToSave.length, "articles");
-      const saveResult = await saveMultipleNewsItems(articlesToSave);
-      
-      // Show results
-      const message = `Save Results:\n• ${saveResult.newlySaved} new articles saved\n• ${saveResult.alreadySaved} were already saved\n• Total: ${saveResult.total} articles processed`;
-      
-      alert(message);
-      
-      // Update the UI to reflect saved state for newly saved articles
-      setArticles(prevArticles => {
-        return prevArticles.map(article => {
-          const wasInFiltered = filteredArticles.some(filtered => filtered.id === article.id);
-          if (wasInFiltered) {
-            return { ...article, isSaved: true };
-          }
-          return article;
-        });
-      });
-      
-      // Update AI filtered articles if active
-      if (aiFilterActive) {
-        setAiFilteredArticles(prevArticles => {
-          return prevArticles.map(article => ({ ...article, isSaved: true }));
-        });
-      }
-      
-    } catch (error) {
-      console.error('Error saving all filtered results:', error);
-      alert('Failed to save some articles. Please try again.');
-    } finally {
-      setSavingAllResults(false);
-    }
-  };
-
-  // Function to determine if we should show the save all button
-  const shouldShowSaveAllButton = () => {
-    const hasActiveFilters = keywords.length > 0 || 
-                           selectedSource !== 'all' || 
-                           selectedCategory !== 'all' || 
-                           aiFilterActive;
-    
-    return hasActiveFilters && filteredArticles.length > 0;
-  };
-
   // Function to get active filters description
   const getActiveFiltersDescription = () => {
     const filters = [];
@@ -1446,43 +1327,6 @@ If no articles match, respond with an empty array: []`;
     if (aiFilterActive) filters.push(`AI Query: "${aiFilterQuery}"`);
     
     return filters.join(' • ');
-  };
-
-  // Updated function: Add article to favorites with duplicate check
-  const handleAddToFavorites = async (article) => {
-    try {
-      // Check if already favorited
-      if (article.isFavorited) {
-        alert('This article is already in your favorites!');
-        return false;
-      }
-
-      // Toggle favorite status to true (add to favorites)
-      await toggleArticleFavorite(article.id, true);
-      
-      // Update the articles array to reflect favorited state
-      setArticles(prevArticles => {
-        return prevArticles.map(a => {
-          if (a.id === article.id) {
-            return { ...a, isFavorited: true };
-          }
-          return a;
-        });
-      });
-      
-      return true;
-    } catch (error) {
-      console.error('Error adding to favorites:', error);
-      
-      // Check if it's an authentication error
-      if (error.message.includes('Authentication required') || 
-          error.code === 'permission-denied') {
-        alert('Please log in to add articles to favorites.');
-      } else {
-        alert('Failed to add the article to favorites. Please try again.');
-      }
-      return false;
-    }
   };
 
   // Updated function: Add selected articles to favorites with duplicate check
@@ -1662,35 +1506,6 @@ If no articles match, respond with an empty array: []`;
     }
   };
 
-  // Updated function: Remove from favorites with check
-  const handleRemoveFromFavorites = async (articleId) => {
-    try {
-      const article = articles.find(a => a.id === articleId);
-      if (!article?.isFavorited) {
-        alert('This article is not in your favorites!');
-        return false;
-      }
-
-      // Toggle favorite status to false (remove from favorites)
-      await toggleArticleFavorite(articleId, false);
-      
-      // Update the articles array to reflect unfavorited state
-      setArticles(prevArticles => {
-        return prevArticles.map(a => {
-          if (a.id === articleId) {
-            return { ...a, isFavorited: false };
-          }
-          return a;
-        });
-      });
-      
-      return true;
-    } catch (error) {
-      console.error("Error removing from favorites:", error);
-      return false;
-    }
-  };
-
   // Updated function: Remove selected from favorites with check
   const handleRemoveSelectedFromFavorites = async () => {
     if (selectedArticles.size === 0) {
@@ -1791,32 +1606,18 @@ If no articles match, respond with an empty array: []`;
   return (
     <NewsContainer>
       <NewsHeader>
-        <div>
-          <NewsTitle>Latest News</NewsTitle>
+        <NewsTitle>News ({articles.length})</NewsTitle>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+          <RefreshButton onClick={handleForceRefresh} disabled={loading}>
+            {loading ? <span></span> : '🔄'} 
+            {loading ? 'Adding new articles...' : 'Refresh & Add New'}
+          </RefreshButton>
           {lastRefreshTime && (
-            <div style={{ fontSize: '0.9rem', color: 'var(--secondary-color)' }}>
+            <div style={{ fontSize: '0.8rem', color: '#666', marginTop: '0.5rem' }}>
               Last updated: {lastRefreshTime.toLocaleTimeString()}
-              {newArticlesCount > 0 && (
-                <span style={{ color: 'var(--success-color)', marginLeft: '10px' }}>
-                  ({newArticlesCount} new articles)
-                </span>
-              )}
+              {newArticlesCount > 0 && ` (+${newArticlesCount} new)`}
             </div>
           )}
-        </div>
-        
-        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <RefreshButton onClick={() => loadNewsData(true, false)} disabled={loading || refreshing}>
-            {loading || refreshing ? 'Refreshing...' : 'Refresh'}
-          </RefreshButton>
-          
-          <AutoRefreshToggle 
-            onClick={toggleAutoRefresh}
-            active={autoRefreshEnabled}
-          >
-            Auto-refresh: {autoRefreshEnabled ? 'ON' : 'OFF'}
-            {refreshing && <span> (Updating...)</span>}
-          </AutoRefreshToggle>
         </div>
       </NewsHeader>
 
@@ -1861,7 +1662,7 @@ If no articles match, respond with an empty array: []`;
           </div>
         </AIFilterInputContainer>
       </AIFilterContainer>
-
+      
       <FiltersContainer>
         <FilterGroup>
           <FilterLabel>Source</FilterLabel>

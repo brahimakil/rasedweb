@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import styled from 'styled-components';
 import { getCorrectImageUrl, getArticleUrl } from '../utils/helpers';
 import { saveNewsItem } from '../utils/api';
@@ -270,7 +270,7 @@ const NewsCard = ({
               disabled={favoriting}
               favoriting={favoriting}
               favorited={article.isFavorited}
-            >
+              >
               {favoriting ? 'Updating...' : article.isFavorited ? '❤️ Favorited' : '🤍 Favorite'}
             </FavoriteButton>
           )}

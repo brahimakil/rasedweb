@@ -244,9 +244,7 @@ const Profile = () => {
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [testPrompt, setTestPrompt] = useState('Hello, can you tell me a short joke?');
   const [statusMessage, setStatusMessage] = useState({ type: '', message: '' });
-  const [availableModels, setAvailableModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState('gemini-2.0-flash');
-  const [loadingModels, setLoadingModels] = useState(false);
 
   useEffect(() => {
     loadUserProfile();

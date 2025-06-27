@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import { fetchAllNews, getAllNewsSources, getAllNewsCategories } from '../../utils/api';
 import { getFromLocalStorage } from '../../utils/storage';
 import { fetchAndProcessNewArticles, toggleArticleFavorite } from '../../utils/api';
 import { callGeminiApi } from '../../utils/gemini';
 import { getCurrentUser } from '../../utils/auth';
-import { doc, getDoc, setDoc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
 import NewsCard from '../../components/NewsCard';
 
@@ -535,12 +535,6 @@ const Dashboard = () => {
     loadArticles();
   }, []);
 
-  useEffect(() => {
-    if (savedNote && allArticles.length > 0) {
-      generateInsights();
-    }
-  }, [savedNote, allArticles]);
-
   const handleRefresh = () => {
     loadData(true);
   };
@@ -579,43 +573,7 @@ const Dashboard = () => {
     }
   };
 
-  const saveAINote = async () => {
-    if (!aiNote.trim()) {
-      setStatus({ type: 'error', message: 'Please enter an AI note before saving.' });
-      return;
-    }
-
-    try {
-      setProcessing(true);
-      setStatus({ type: 'processing', message: 'Saving AI note and generating insights...' });
-
-      const user = await getCurrentUser();
-      if (!user) {
-        throw new Error('User not authenticated');
-      }
-
-      const userDocRef = doc(db, 'user_ai_notes', user.uid);
-      await setDoc(userDocRef, {
-        note: aiNote.trim(),
-        updatedAt: new Date().toISOString(),
-        userId: user.uid
-      }, { merge: true });
-
-      setSavedNote(aiNote.trim());
-      setStatus({ type: 'success', message: 'AI note saved successfully! Generating insights...' });
-
-      // Generate insights after saving
-      await generateInsights();
-
-    } catch (error) {
-      console.error('Error saving AI note:', error);
-      setStatus({ type: 'error', message: 'Failed to save AI note. Please try again.' });
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  const generateInsights = async () => {
+  const generateInsights = useCallback(async () => {
     if (!savedNote || allArticles.length === 0) return;
 
     try {
@@ -850,6 +808,48 @@ IMPORTANT:
         type: 'error', 
         message: 'Analysis failed. Please try again. / فشل التحليل، يرجى المحاولة مرة أخرى' 
       });
+    } finally {
+      setProcessing(false);
+    }
+  }, [savedNote, allArticles]);
+
+  useEffect(() => {
+    if (savedNote && allArticles.length > 0) {
+      generateInsights();
+    }
+  }, [savedNote, allArticles, generateInsights]);
+
+  const saveAINote = async () => {
+    if (!aiNote.trim()) {
+      setStatus({ type: 'error', message: 'Please enter an AI note before saving.' });
+      return;
+    }
+
+    try {
+      setProcessing(true);
+      setStatus({ type: 'processing', message: 'Saving AI note and generating insights...' });
+
+      const user = await getCurrentUser();
+      if (!user) {
+        throw new Error('User not authenticated');
+      }
+
+      const userDocRef = doc(db, 'user_ai_notes', user.uid);
+      await setDoc(userDocRef, {
+        note: aiNote.trim(),
+        updatedAt: new Date().toISOString(),
+        userId: user.uid
+      }, { merge: true });
+
+      setSavedNote(aiNote.trim());
+      setStatus({ type: 'success', message: 'AI note saved successfully! Generating insights...' });
+
+      // Generate insights after saving
+      await generateInsights();
+
+    } catch (error) {
+      console.error('Error saving AI note:', error);
+      setStatus({ type: 'error', message: 'Failed to save AI note. Please try again.' });
     } finally {
       setProcessing(false);
     }

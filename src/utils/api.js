@@ -18,10 +18,27 @@ import { getCurrentUser } from './auth';
 const API_URL = 'https://rasedbackend.onrender.com/api';
 const NEWS_STORAGE_KEY = 'rased_news_data';
 const LAST_FETCHED_KEY = 'rased_last_fetched';
+const ARTICLES_STORAGE_KEY = 'rased_articles_cache';
+
+// Export cache duration constant
+export const CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
 
 // Add error handling state
 let isFirebaseUnavailable = false;
 let lastFirebaseError = null;
+
+// SMART CACHE FUNCTION: Check if cache is expired
+const isCacheExpired = () => {
+  const lastFetched = getFromLocalStorage(LAST_FETCHED_KEY);
+  if (!lastFetched) return true;
+  
+  const lastFetchedTime = new Date(lastFetched).getTime();
+  const now = new Date().getTime();
+  const timeDiff = now - lastFetchedTime;
+  
+  console.log(`⏰ Cache age: ${Math.round(timeDiff / (1000 * 60))} minutes`);
+  return timeDiff > CACHE_DURATION;
+};
 
 // Fetch all news with caching
 export const fetchAllNews = async (forceRefresh = false) => {
@@ -699,115 +716,163 @@ export const getFavoritedArticles = async () => {
   }
 };
 
-// Core function: Fetch from API, check DB for duplicates, return only new articles
-export const fetchAndProcessNewArticles = async () => {
+// NEW: Save articles to localStorage
+export const saveArticlesToLocalStorage = (articles) => {
   try {
-    console.log('🔄 Fetching fresh news from API...');
+    saveToLocalStorage(ARTICLES_STORAGE_KEY, {
+      articles: articles,
+      timestamp: new Date().toISOString()
+    });
+    console.log(`💾 Saved ${articles.length} articles to localStorage`);
+  } catch (error) {
+    console.error('Error saving articles to localStorage:', error);
+  }
+};
+
+// NEW: Load articles from localStorage
+export const loadArticlesFromLocalStorage = () => {
+  try {
+    const cached = getFromLocalStorage(ARTICLES_STORAGE_KEY);
+    if (cached && cached.articles) {
+      console.log(`📖 Loaded ${cached.articles.length} articles from localStorage`);
+      return cached.articles;
+    }
+    return [];
+  } catch (error) {
+    console.error('Error loading articles from localStorage:', error);
+    return [];
+  }
+};
+
+// FIXED: Fetch and process with localStorage caching
+export const fetchAndProcessNewArticles = async (isRefresh = false) => {
+  try {
+    console.log(`🔄 ${isRefresh ? 'Refreshing' : 'Loading'} articles...`);
     
-    // Step 1: Fetch fresh data from API
-    const response = await axios.get(`${API_URL}/scraper/all-news/`);
+    // Step 1: Load existing articles from localStorage (instant)
+    const existingArticlesFromCache = loadArticlesFromLocalStorage();
+    
+    // Step 2: If not refresh and we have cached articles, return them immediately
+    if (!isRefresh && existingArticlesFromCache.length > 0) {
+      console.log(`⚡ Using ${existingArticlesFromCache.length} cached articles (instant load)`);
+      return {
+        articles: existingArticlesFromCache,
+        newArticlesCount: 0,
+        totalArticlesCount: existingArticlesFromCache.length,
+        lastFetched: new Date().toISOString(),
+        availableSources: [...new Set(existingArticlesFromCache.map(a => a.source))],
+        fromCache: true
+      };
+    }
+    
+    // Step 3: Fetch fresh API data
+    const apiResult = await fetchAllNews(true); // Always force refresh for new data
     const apiArticles = [];
     
     // Flatten all articles from all sources
-    Object.keys(response.data.articlesBySource).forEach(source => {
-      response.data.articlesBySource[source].forEach(article => {
+    Object.keys(apiResult.articlesBySource).forEach(source => {
+      apiResult.articlesBySource[source].forEach(article => {
         apiArticles.push({
           ...article,
           source: source,
-          fetchedAt: new Date().toISOString()
+          fetchedAt: new Date().toISOString(),
+          isFavorited: false,
+          isSaved: false
         });
       });
     });
     
     console.log(`📥 Fetched ${apiArticles.length} articles from API`);
     
-    // CRITICAL FIX: Remove duplicates from API data BEFORE processing
-    const uniqueApiArticles = removeDuplicatesFromArray(apiArticles);
-    console.log(`🔧 Removed ${apiArticles.length - uniqueApiArticles.length} duplicate articles from API data`);
+    // Step 4: Get existing articles from database
+    const existingArticlesFromDB = await fetchNewsFromDatabase();
+    console.log(`💾 Found ${existingArticlesFromDB.length} articles in database`);
     
-    // Step 2: Get existing articles from database
-    const existingArticles = await fetchNewsFromDatabase();
-    const existingIds = new Set(existingArticles.map(article => article.id));
+    // Step 5: FIXED LOGIC - Combine ALL articles properly
+    let allArticles = [];
     
-    console.log(`💾 Found ${existingArticles.length} existing articles in database`);
-    
-    // Step 3: Filter out duplicates - only keep new articles
-    const newArticles = uniqueApiArticles.filter(article => {
-      const isNew = !existingIds.has(article.id);
-      if (!isNew) {
-        console.log(`⏭️ Skipping duplicate article: ${article.id} - ${article.title?.substring(0, 50)}...`);
-      }
-      return isNew;
-    });
-    
-    console.log(`✨ Found ${newArticles.length} NEW articles to save (${uniqueApiArticles.length - newArticles.length} duplicates skipped)`);
-    
-    // Step 4: Save new articles to database
-    let savedCount = 0;
-    if (newArticles.length > 0) {
-      try {
-        const user = await getCurrentUser();
-        if (user) {
-          console.log(`💾 About to save ${newArticles.length} new articles to database...`);
-          
-          // Save in batches to avoid Firestore limits
-          const batchSize = 10;
-          for (let i = 0; i < newArticles.length; i += batchSize) {
-            const batch = newArticles.slice(i, i + batchSize);
-            await saveArticlesToDatabase(batch);
-            savedCount += batch.length;
-            console.log(`💾 Saved batch ${Math.floor(i/batchSize) + 1}: ${batch.length} articles`);
+    if (isRefresh) {
+      // For refresh: start with cached articles, add new API articles
+      const allExistingIds = new Set([
+        ...existingArticlesFromCache.map(a => a.id),
+        ...existingArticlesFromDB.map(a => a.id)
+      ]);
+      
+      const newArticles = apiArticles.filter(article => !allExistingIds.has(article.id));
+      console.log(`✨ Found ${newArticles.length} NEW articles for refresh`);
+      
+      // Save new articles to database
+      if (newArticles.length > 0) {
+        try {
+          const user = await getCurrentUser();
+          if (user) {
+            console.log(`💾 Saving ${newArticles.length} new articles to database...`);
+            const batchSize = 5;
+            for (let i = 0; i < newArticles.length; i += batchSize) {
+              const batch = newArticles.slice(i, i + batchSize);
+              await saveArticlesToDatabase(batch);
+            }
+            console.log(`✅ Saved ${newArticles.length} new articles to database`);
           }
-          console.log(`✅ Successfully saved ${savedCount} NEW articles to database`);
-        } else {
-          console.log('⚠️ User not authenticated, articles not saved to database');
+        } catch (saveError) {
+          console.error('❌ Error saving new articles:', saveError);
         }
-      } catch (saveError) {
-        console.error('❌ Error saving articles to database:', saveError);
       }
+      
+      // Combine: existing cached + new articles
+      allArticles = [...existingArticlesFromCache, ...newArticles];
+      
     } else {
-      console.log('✅ No new articles to save - all articles already exist in database');
+      // For initial load: prioritize DB articles (with user data), then add API articles
+      const dbIds = new Set(existingArticlesFromDB.map(a => a.id));
+      const apiOnlyArticles = apiArticles.filter(a => !dbIds.has(a.id));
+      
+      console.log(`🔗 Combining ${existingArticlesFromDB.length} DB articles + ${apiOnlyArticles.length} API-only articles`);
+      
+      // Combine: DB articles (with user data) + API-only articles
+      allArticles = [...existingArticlesFromDB, ...apiOnlyArticles];
     }
     
-    // Step 5: Get fresh data from database and ensure no duplicates
-    const allArticlesFromDB = await fetchNewsFromDatabase();
-    const uniqueArticlesFromDB = removeDuplicatesFromArray(allArticlesFromDB);
+    // Remove duplicates
+    const uniqueArticles = removeDuplicatesFromArray(allArticles);
     
-    console.log(`📊 Final result: ${uniqueArticlesFromDB.length} unique articles, ${newArticles.length} were new`);
+    // Step 6: Save ALL articles to localStorage
+    saveArticlesToLocalStorage(uniqueArticles);
     
-    // Get all available sources from API
-    const allAvailableSources = Object.keys(response.data.articlesBySource);
-    console.log(`📋 All available sources:`, allAvailableSources);
+    const newCount = isRefresh ? 
+      apiArticles.filter(a => !existingArticlesFromCache.some(cached => cached.id === a.id)).length :
+      apiArticles.filter(a => !existingArticlesFromDB.some(db => db.id === a.id)).length;
+    
+    console.log(`📊 Total articles: ${uniqueArticles.length} (${existingArticlesFromCache.length} cached + ${newCount} new)`);
     
     return {
-      articles: uniqueArticlesFromDB, // Return unique articles only
-      newArticlesCount: newArticles.length,
-      totalArticlesCount: uniqueArticlesFromDB.length,
+      articles: uniqueArticles,
+      newArticlesCount: newCount,
+      totalArticlesCount: uniqueArticles.length,
       lastFetched: new Date().toISOString(),
-      availableSources: allAvailableSources,
-      apiData: response.data
+      availableSources: Object.keys(apiResult.articlesBySource),
+      fromCache: false
     };
     
   } catch (error) {
     console.error('❌ Error in fetchAndProcessNewArticles:', error);
     
-    // Fallback: return existing articles from database
-    try {
-      const existingArticles = await fetchNewsFromDatabase();
-      const uniqueExistingArticles = removeDuplicatesFromArray(existingArticles);
-      console.log('🔄 Using fallback: returning unique existing articles from database');
+    // Fallback: return cached articles if available
+    const cachedArticles = loadArticlesFromLocalStorage();
+    if (cachedArticles.length > 0) {
+      console.log('🔄 Using cached articles as fallback');
       return {
-        articles: uniqueExistingArticles,
+        articles: cachedArticles,
         newArticlesCount: 0,
-        totalArticlesCount: uniqueExistingArticles.length,
+        totalArticlesCount: cachedArticles.length,
         lastFetched: new Date().toISOString(),
-        availableSources: [...new Set(uniqueExistingArticles.map(a => a.source))],
-        error: error.message
+        availableSources: [...new Set(cachedArticles.map(a => a.source))],
+        error: error.message,
+        fromCache: true
       };
-    } catch (fallbackError) {
-      console.error('❌ Fallback also failed:', fallbackError);
-      throw error;
     }
+    
+    throw error;
   }
 };
 
@@ -824,4 +889,30 @@ const removeDuplicatesFromArray = (articles) => {
   });
   
   return uniqueArticles;
+};
+
+// ENHANCED: Smart refresh function
+export const forceRefreshNews = async () => {
+  console.log('🔄 Force refreshing news data...');
+  
+  // Clear cache first
+  localStorage.removeItem(NEWS_STORAGE_KEY);
+  localStorage.removeItem(LAST_FETCHED_KEY);
+  
+  // Fetch fresh data
+  return await fetchAllNews(true);
+};
+
+// UTILITY: Check cache status
+export const getCacheStatus = () => {
+  const lastFetched = getFromLocalStorage(LAST_FETCHED_KEY);
+  const isExpired = isCacheExpired();
+  
+  return {
+    lastFetched,
+    isExpired,
+    ageInMinutes: lastFetched ? Math.round((new Date().getTime() - new Date(lastFetched).getTime()) / (1000 * 60)) : null,
+    nextRefreshIn: lastFetched && !isExpired ? 
+      Math.round((CACHE_DURATION - (new Date().getTime() - new Date(lastFetched).getTime())) / (1000 * 60)) : 0
+  };
 };

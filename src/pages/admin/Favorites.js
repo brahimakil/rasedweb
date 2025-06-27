@@ -1,10 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import styled from 'styled-components';
 import { getFavoritedArticles, toggleArticleFavorite } from '../../utils/api';
 import { callGeminiApi } from '../../utils/gemini';
 import NewsCard from '../../components/NewsCard';
-import { saveToLocalStorage } from '../../utils/storage';
-import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 
 // Reuse the same styled components from News.js for consistency
@@ -621,36 +619,7 @@ const Favorites = () => {
   }, []);
 
   // Apply filters when any filter changes
-  useEffect(() => {
-    applyFilters();
-  }, [favoritedArticles, searchTerm, selectedSource, selectedCategory, keywords, keywordMode, aiFilterActive, aiFilteredArticles]);
-
-  const loadFavoritedArticles = async () => {
-    try {
-      setLoading(true);
-      
-      // Get favorited articles from database
-      const articles = await getFavoritedArticles();
-      
-      // Set articles
-      setFavoritedArticles(articles);
-      
-      // Extract unique sources and categories
-      const uniqueSources = [...new Set(articles.map(article => article.source))];
-      const uniqueCategories = [...new Set(articles.map(article => article.category).filter(Boolean))];
-      
-      setSources(uniqueSources);
-      setCategories(uniqueCategories);
-      
-    } catch (error) {
-      console.error('Error loading favorited articles:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Enhanced filtering function that includes AI filtering
-  const applyFilters = () => {
+  const applyFilters = useCallback(() => {
     let filtered = [...favoritedArticles];
     
     // If AI filter is active, start with AI filtered results
@@ -731,6 +700,34 @@ const Favorites = () => {
     }
     
     setFilteredArticles(filtered);
+  }, [favoritedArticles, searchTerm, selectedSource, selectedCategory, keywords, keywordMode, aiFilterActive, aiFilteredArticles]);
+
+  useEffect(() => {
+    applyFilters();
+  }, [applyFilters]);
+
+  const loadFavoritedArticles = async () => {
+    try {
+      setLoading(true);
+      
+      // Get favorited articles from database
+      const articles = await getFavoritedArticles();
+      
+      // Set articles
+      setFavoritedArticles(articles);
+      
+      // Extract unique sources and categories
+      const uniqueSources = [...new Set(articles.map(article => article.source))];
+      const uniqueCategories = [...new Set(articles.map(article => article.category).filter(Boolean))];
+      
+      setSources(uniqueSources);
+      setCategories(uniqueCategories);
+      
+    } catch (error) {
+      console.error('Error loading favorited articles:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   // AI Filtering Functions (exact same as News.js)
