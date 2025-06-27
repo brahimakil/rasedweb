@@ -744,7 +744,7 @@ export const loadArticlesFromLocalStorage = () => {
   }
 };
 
-// FIXED: Fetch and process with localStorage caching
+// FIXED: Fetch and process with localStorage caching - newest data on top
 export const fetchAndProcessNewArticles = async (isRefresh = false) => {
   try {
     console.log(`🔄 ${isRefresh ? 'Refreshing' : 'Loading'} articles...`);
@@ -756,7 +756,7 @@ export const fetchAndProcessNewArticles = async (isRefresh = false) => {
     if (!isRefresh && existingArticlesFromCache.length > 0) {
       console.log(`⚡ Using ${existingArticlesFromCache.length} cached articles (instant load)`);
       return {
-        articles: existingArticlesFromCache,
+        articles: existingArticlesFromCache, // Keep existing order
         newArticlesCount: 0,
         totalArticlesCount: existingArticlesFromCache.length,
         lastFetched: new Date().toISOString(),
@@ -766,7 +766,7 @@ export const fetchAndProcessNewArticles = async (isRefresh = false) => {
     }
     
     // Step 3: Fetch fresh API data
-    const apiResult = await fetchAllNews(true); // Always force refresh for new data
+    const apiResult = await fetchAllNews(true);
     const apiArticles = [];
     
     // Flatten all articles from all sources
@@ -775,7 +775,7 @@ export const fetchAndProcessNewArticles = async (isRefresh = false) => {
         apiArticles.push({
           ...article,
           source: source,
-          fetchedAt: new Date().toISOString(),
+          fetchedAt: new Date().toISOString(), // Mark when fetched
           isFavorited: false,
           isSaved: false
         });
@@ -788,11 +788,11 @@ export const fetchAndProcessNewArticles = async (isRefresh = false) => {
     const existingArticlesFromDB = await fetchNewsFromDatabase();
     console.log(`💾 Found ${existingArticlesFromDB.length} articles in database`);
     
-    // Step 5: FIXED LOGIC - Combine ALL articles properly
-    let allArticles = [];
+    // Step 5: FIXED - Put NEW articles at the TOP
+    let finalArticles = [];
     
     if (isRefresh) {
-      // For refresh: start with cached articles, add new API articles
+      // For refresh: NEW articles first, then existing cached articles
       const allExistingIds = new Set([
         ...existingArticlesFromCache.map(a => a.id),
         ...existingArticlesFromDB.map(a => a.id)
@@ -819,34 +819,34 @@ export const fetchAndProcessNewArticles = async (isRefresh = false) => {
         }
       }
       
-      // Combine: existing cached + new articles
-      allArticles = [...existingArticlesFromCache, ...newArticles];
+      // NEW ARTICLES FIRST, then existing cached articles
+      finalArticles = [...newArticles, ...existingArticlesFromCache];
       
     } else {
-      // For initial load: prioritize DB articles (with user data), then add API articles
+      // For initial load: NEW API articles first, then DB articles
       const dbIds = new Set(existingArticlesFromDB.map(a => a.id));
-      const apiOnlyArticles = apiArticles.filter(a => !dbIds.has(a.id));
+      const newApiArticles = apiArticles.filter(a => !dbIds.has(a.id));
       
-      console.log(`🔗 Combining ${existingArticlesFromDB.length} DB articles + ${apiOnlyArticles.length} API-only articles`);
+      console.log(`🔗 Putting ${newApiArticles.length} NEW API articles first, then ${existingArticlesFromDB.length} DB articles`);
       
-      // Combine: DB articles (with user data) + API-only articles
-      allArticles = [...existingArticlesFromDB, ...apiOnlyArticles];
+      // NEW API ARTICLES FIRST, then existing DB articles
+      finalArticles = [...newApiArticles, ...existingArticlesFromDB];
     }
     
-    // Remove duplicates
-    const uniqueArticles = removeDuplicatesFromArray(allArticles);
+    // Remove duplicates while preserving order (new articles stay at top)
+    const uniqueArticles = removeDuplicatesFromArray(finalArticles);
     
-    // Step 6: Save ALL articles to localStorage
+    // Save to localStorage with new articles at top
     saveArticlesToLocalStorage(uniqueArticles);
     
     const newCount = isRefresh ? 
       apiArticles.filter(a => !existingArticlesFromCache.some(cached => cached.id === a.id)).length :
       apiArticles.filter(a => !existingArticlesFromDB.some(db => db.id === a.id)).length;
     
-    console.log(`📊 Total articles: ${uniqueArticles.length} (${existingArticlesFromCache.length} cached + ${newCount} new)`);
+    console.log(`📊 Total articles: ${uniqueArticles.length} (${newCount} NEW at top + ${uniqueArticles.length - newCount} existing)`);
     
     return {
-      articles: uniqueArticles,
+      articles: uniqueArticles, // New articles are now at the top
       newArticlesCount: newCount,
       totalArticlesCount: uniqueArticles.length,
       lastFetched: new Date().toISOString(),
